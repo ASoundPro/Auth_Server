@@ -151,42 +151,40 @@ TIER_NAME = {v: k for k, v in TIER_CODE.items()}
 
 def generate_license_key(tier: str, days: int, machines: int,
                           customer_id: int) -> str:
-    tc = TIER_NAME.get(tier, "S")
+    import struct as _struct
+    tier_idx = {"Starter":0,"Pro":1,"Enterprise":2,"Lifetime":3}.get(tier, 0)
     expiry = int(time.time()) + days * 86400
-    payload = f"{tc}|{expiry}|{machines}|{customer_id:06d}"
-    sig = hmac.new(_LK_SECRET, payload.encode(), hashlib.sha256).hexdigest()[:5].upper()
-    b32 = base64.b32encode(payload.encode()).decode().rstrip("=").ljust(25, "A")[:25]
-    raw = b32 + sig
-    chunks = [raw[i:i+6] for i in range(0, len(raw), 6)]
-    return "PH4-" + "-".join(chunks)
+    data = _struct.pack(">BIBI", tier_idx, expiry, min(machines,255), customer_id & 0xFFFFFFFF)
+    b32 = base64.b32encode(data).decode()          # always 16 chars, no padding
+    sig  = hmac.new(_LK_SECRET, data, hashlib.sha256).hexdigest()[:8].upper()
+    raw  = b32 + sig                               # 24 chars total
+    return "PH4-" + "-".join(raw[i:i+6] for i in range(0, 24, 6))
 
 
 def validate_license_key(key: str) -> dict:
+    import struct as _struct
     try:
         key = key.strip().upper()
         if not key.startswith("PH4-"):
             return {"valid": False, "error": "Bad prefix"}
         raw = key[4:].replace("-", "")
-        b32_part = raw[:25]
-        sig_part = raw[25:30]
-        padded = b32_part + "=" * ((8 - len(b32_part) % 8) % 8)
-        payload = base64.b32decode(padded).decode()
-        parts = payload.split("|")
-        if len(parts) != 4:
-            return {"valid": False, "error": "Bad structure"}
-        tc, expiry_s, machines_s, cid_s = parts
-        expected = hmac.new(_LK_SECRET, payload.encode(),
-                             hashlib.sha256).hexdigest()[:5].upper()
+        if len(raw) != 24:
+            return {"valid": False, "error": f"Bad key length ({len(raw)}, expected 24)"}
+        b32_part = raw[:16]
+        sig_part  = raw[16:24]
+        data = base64.b32decode(b32_part)
+        tier_idx, expiry, machines, cid = _struct.unpack(">BIBI", data)
+        expected = hmac.new(_LK_SECRET, data, hashlib.sha256).hexdigest()[:8].upper()
         if not hmac.compare_digest(sig_part, expected):
             return {"valid": False, "error": "Bad signature"}
-        expiry = int(expiry_s)
+        tier_name = {0:"Starter",1:"Pro",2:"Enterprise",3:"Lifetime"}.get(tier_idx, "Unknown")
         days_left = max(0, int((expiry - time.time()) / 86400))
         return {
             "valid":       time.time() < expiry,
-            "tier":        TIER_CODE.get(tc, "Unknown"),
+            "tier":        tier_name,
             "expiry":      expiry,
-            "machines":    int(machines_s),
-            "customer_id": int(cid_s),
+            "machines":    machines,
+            "customer_id": cid,
             "days_left":   days_left,
         }
     except Exception as e:
